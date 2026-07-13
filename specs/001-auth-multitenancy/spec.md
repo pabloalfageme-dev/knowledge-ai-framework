@@ -165,11 +165,14 @@ returns aggregate counts with no user-identifiable data.
 ### Edge Cases
 
 - **Resolved**: When a token is used after the issuing user is deactivated (or after their
-  organization is deactivated), the revocation check rejects the request immediately with a 401;
-  deactivation writes to the revocation store and takes effect on the very next request.
-- What happens if the initial setup endpoint is called concurrently by two processes on a fresh deployment?
+  organization is deactivated), the revocation check rejects the request with a 401 within
+  at most one cache TTL window (default 30 s, configurable); deactivation writes to the
+  revocation store and takes effect on the next request after the cache entry expires.
+- **Resolved**: When the initial setup endpoint is called concurrently by two processes on a fresh deployment, the first transaction to INSERT the organization wins; the losing transaction receives a unique-constraint violation which the endpoint maps to a 409 Conflict response. No advisory locks or external coordination are required.
 - **Resolved**: Login failure responses for a wrong password, locked account, or non-existent email are indistinguishable to the caller (FR-016). Failed attempts increment a counter; lockout triggers after the configured threshold.
-- What happens when an audit log write fails — does it block the primary authentication response?
+- **Resolved**: Audit log write failures are non-blocking — if an audit write fails, the
+  primary authentication operation still completes and the failure is logged to the application
+  error log.
 
 ## Requirements *(mandatory)*
 
@@ -182,8 +185,11 @@ returns aggregate counts with no user-identifiable data.
 - **FR-003**: Every access token MUST carry the user's organization identifier, role, and a
   unique token identifier (JTI). Token claims MUST be verifiable cryptographically; in addition,
   every authenticated request MUST check the token's JTI (or the user/organization active status)
-  against a revocation store to enforce immediate effect of user and organization deactivation —
-  deactivated users and organizations MUST be rejected without waiting for token expiry.
+  against a revocation store to enforce near-immediate effect of user and organization deactivation.
+  The revocation check MAY be served from an in-process short-TTL cache (configurable via env var,
+  default 30 seconds) to reduce database load; this means revocation takes effect within at most
+  one cache window rather than instantly. No external cache infrastructure (e.g. Redis) is
+  required.
 - **FR-004**: The system MUST support exactly three roles: `super_admin` (framework-level,
   not scoped to any organization), `admin` (organization-level), and `user` (organization-level).
 - **FR-005**: The system MUST record an audit entry for every authentication event: successful
@@ -213,7 +219,7 @@ returns aggregate counts with no user-identifiable data.
   revocation of the entire token family to detect theft.
 - **FR-016**: After a configurable number of consecutive failed login attempts (default: 5),
   the account MUST be locked for a configurable duration (default: 15 minutes). Lockout MUST
-  be recorded as an audit entry. A locked account MUST clear automatically after the configured
+  be recorded as an `ACCOUNT_LOCKED` audit entry. A locked account MUST clear automatically after the configured
   window; an org admin MAY also manually unlock accounts within their organization. Error
   responses for a locked account, a wrong password, or an unknown email MUST be
   indistinguishable to the caller (prevents user enumeration).
@@ -228,10 +234,11 @@ returns aggregate counts with no user-identifiable data.
   tenant boundary; all data is scoped to an organization.
 - **User**: identifier, organization_id, email, hashed credential (password hash or API key
   hash), role, status (active/inactive), failed_login_count, locked_until (nullable),
-  created_at — belongs to exactly one organization.
+  created_at — belongs to exactly one organization. `email` carries a system-wide unique
+  constraint (not scoped per organization).
 - **AuditLogEntry**: identifier, occurred_at (UTC), user_id (nullable), organization_id
-  (nullable), event_type (LOGIN_SUCCESS | LOGIN_FAILURE | LOGOUT | TOKEN_REFRESH), ip_address
-  — append-only, never modified after creation.
+  (nullable), event_type (LOGIN_SUCCESS | LOGIN_FAILURE | LOGOUT | TOKEN_REFRESH | ACCOUNT_LOCKED),
+  ip_address — append-only, never modified after creation.
 
 ## Success Criteria *(mandatory)*
 
@@ -249,8 +256,12 @@ returns aggregate counts with no user-identifiable data.
   user in under 2 minutes.
 - **SC-006**: The initial deployment setup completes successfully in under 5 minutes on a
   fresh environment with no prior data.
-- **SC-007**: Deactivating a user or organization takes effect for all new authentication
-  attempts without a service restart or redeployment.
+- **SC-007**: Deactivating a user or organization takes effect along two paths, each with
+  its own guarantee: (a) a new login attempt using email and password is rejected
+  immediately, because the login flow reads live account status directly from the database;
+  (b) a request that presents an already-issued token is rejected within at most one
+  revocation cache window (default 30 s, configurable). Neither path requires a service
+  restart or redeployment.
 
 ## Assumptions
 
@@ -259,12 +270,18 @@ returns aggregate counts with no user-identifiable data.
   via configuration if independent verification by other services is needed in future. Access
   tokens are short-lived (configurable, default 15 minutes) paired with longer-lived refresh
   tokens (configurable, default 7 days).
-- Email addresses are the unique login identifier for human users.
+- Email addresses are the unique login identifier for human users and MUST be unique
+  system-wide (not merely per organization); a given email may exist in at most one
+  organization. The `users` table carries a unique index on `email`. Login requires only
+  email + password — no organization identifier is needed for lookup.
 - Service accounts authenticate via API keys; API keys are stored in hashed form and treated
   with the same security requirements as passwords.
 - Password complexity rules are configurable via environment variables and not hardcoded.
 - Password reset and self-service credential recovery are out of scope for v1.
 - The audit log is append-only; no entry is ever deleted or modified after creation.
+  v1 retains all audit entries indefinitely — no pruning, archival, or partitioning logic
+  is implemented. Retention policy and table growth management are explicitly deferred to a
+  future release as a known scalability item.
 - Audit log write failures are non-blocking: if an audit write fails, the primary
   authentication operation still completes and the failure is logged to the application
   error log.
@@ -275,7 +292,15 @@ returns aggregate counts with no user-identifiable data.
   a potential theft signal and invalidates the entire token family for that user session.
 - The initial setup is triggered via a dedicated CLI command or a protected bootstrap
   endpoint, not the standard API surface.
+- Concurrent calls to the initial setup endpoint are handled exclusively via a database unique
+  constraint on the Organization table combined with a single atomic transaction (SELECT
+  count + INSERT wrapped in one transaction). The first caller to commit wins; any concurrent
+  caller receives a unique-constraint violation that the endpoint translates to a 409 Conflict.
+  No advisory locks, distributed locks, or application-level serialization are required.
 - Multi-factor authentication (MFA) is out of scope for v1.
+- Single Sign-On (SSO) and social login are out of scope for v1. Authentication is limited
+  to email/password for human users (FR-014). SSO may be introduced later via an OIDC
+  provider abstraction if a client deployment specifically requires it.
 - The `super_admin` role is assigned directly in the database or via the CLI during operator
   setup; no API endpoint exists to grant or revoke `super_admin` from the standard UI.
 - Account lockout thresholds (consecutive failure count, lockout duration) are configurable
@@ -285,8 +310,20 @@ returns aggregate counts with no user-identifiable data.
   organization deactivation, a sentinel record keyed to the user_id or organization_id is
   written so that all subsequently presented tokens for that subject are rejected. Revocation
   records are pruned once their associated token's natural expiry has passed.
+- The revocation store check MAY be served from an in-process LRU/TTL cache (default TTL:
+  30 s, configurable via `REVOCATION_CACHE_TTL_SECONDS`). A revoked token is therefore
+  rejected within at most one cache window. The cache is process-local; no external caching
+  infrastructure (e.g. Redis) is required.
 
 ## Clarifications
+
+### Session 2026-07-13
+
+- Q: What happens if the initial setup endpoint is called concurrently by two processes on a fresh deployment? → A: DB unique constraint + transaction — the first committing transaction wins; the losing caller receives a 409 Conflict mapped from the constraint violation; no advisory locks needed.
+- Q: How should the account lockout mandated by FR-016 be recorded in the audit log — the event_type enum was missing a lockout value? → A: Add ACCOUNT_LOCKED as a dedicated event type — lockout gets its own enum value, distinct from the LOGIN_FAILURE entries that preceded it, making lockout events directly queryable.
+- Q: Is email unique per organization or system-wide? → A: System-wide — a given email may exist in at most one organization; unique index on users.email; login needs only email + password with no org disambiguation.
+- Q: Must the revocation store be checked via a direct DB hit on every request, or may it be cached in-process? → A: In-process short-TTL cache allowed (default 30 s, configurable via REVOCATION_CACHE_TTL_SECONDS); no Redis or external cache required; revocation effective within one cache window.
+- Q: What is the audit log retention policy — how long are entries kept? → A: Retain indefinitely for v1 — no pruning or archival implemented; explicitly deferred as a scalability item for a future release.
 
 ### Session 2026-07-04
 
