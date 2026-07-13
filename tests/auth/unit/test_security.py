@@ -99,7 +99,7 @@ def test_decode_access_token_raises_on_wrong_secret():
 
     import jwt as _jwt
 
-    tampered = _jwt.encode({"sub": str(user_id)}, "wrong-secret", algorithm="HS256")
+    tampered = _jwt.encode({"sub": str(user_id)}, "wrong-secret-key-padded-to-32-bytes!!", algorithm="HS256")
     with pytest.raises(_jwt.PyJWTError):
         decode_access_token(tampered)
 
