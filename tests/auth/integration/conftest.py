@@ -92,6 +92,11 @@ async def db_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
         # Patch commit → flush so handler commits don't escape the test transaction.
         # The fixture calls session.rollback() at teardown to undo all changes.
         session.commit = session.flush  # type: ignore[method-assign]
+        # Run as kn_app (RLS-enforced role) so tests verify DB-layer isolation,
+        # not just the application WHERE clauses.  SET ROLE (not LOCAL) so the
+        # baseline survives across SET LOCAL ROLE kn_admin calls inside the app;
+        # after each ROLLBACK the LOCAL override is gone and kn_app is restored.
+        await session.execute(text("SET ROLE kn_app"))
         yield session
         await session.rollback()
 

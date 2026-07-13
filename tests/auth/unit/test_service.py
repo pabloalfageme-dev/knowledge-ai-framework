@@ -327,6 +327,8 @@ async def test_authenticate_user_success_returns_token_pair() -> None:
 
     with (
         patch("src.auth.service.set_admin_context", new=AsyncMock()),
+        patch("src.auth.service.set_app_context", new=AsyncMock()),
+        patch("src.auth.service.set_rls_context", new=AsyncMock()),
         patch("src.auth.service.verify_password", return_value=True),
         patch("src.auth.service.write_audit_entry", new=AsyncMock()),
     ):
@@ -401,6 +403,8 @@ async def test_refresh_tokens_success_returns_token_pair() -> None:
 
     with (
         patch("src.auth.service.set_admin_context", new=AsyncMock()),
+        patch("src.auth.service.set_app_context", new=AsyncMock()),
+        patch("src.auth.service.set_rls_context", new=AsyncMock()),
         patch("src.auth.service.hash_refresh_token", return_value="hash"),
         patch("src.auth.service.write_audit_entry", new=AsyncMock()),
     ):

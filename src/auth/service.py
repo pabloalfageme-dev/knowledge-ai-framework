@@ -26,7 +26,7 @@ from src.auth.security import (
     hash_refresh_token,
     verify_password,
 )
-from src.core.database import set_admin_context, set_rls_context
+from src.core.database import set_admin_context, set_app_context, set_rls_context
 
 _logger = logging.getLogger(__name__)
 
@@ -181,6 +181,13 @@ async def authenticate_user(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Organization is inactive"
         )
 
+    # Revert from kn_admin back to kn_app so remaining writes run under RLS.
+    # super_admin has organization_id=None: no org context to set, stay as kn_admin
+    # so audit and token writes bypass the policy (audit_log.organization_id IS NULL).
+    if user.organization_id is not None:
+        await set_app_context(session)
+        await set_rls_context(session, user.organization_id)
+
     user.failed_login_count = 0
     user.locked_until = None
     await session.flush()
@@ -249,6 +256,12 @@ async def refresh_tokens(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="User or organization is inactive"
         )
+
+    # Revert from kn_admin back to kn_app so audit and token writes run under RLS.
+    # super_admin (org=None): no org context to set, stay as kn_admin.
+    if user.organization_id is not None:
+        await set_app_context(session)
+        await set_rls_context(session, user.organization_id)
 
     await write_audit_entry(
         session, "TOKEN_REFRESH", ip_address, user_id=user.id, org_id=user.organization_id

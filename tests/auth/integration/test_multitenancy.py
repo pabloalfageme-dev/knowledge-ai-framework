@@ -3,10 +3,12 @@
 Creates Org A and Org B, each with an admin and a regular user.
 All cross-tenant operations must return 403 or 404 — never 200.
 
-NOTE: db_session runs as postgres superuser (BYPASSRLS), so these tests verify
-the application-layer WHERE clause isolation. The production migration adds
-kn_app with RLS enforcement; the service-layer WHERE clauses are the
-defence-in-depth backup tested here.
+db_session issues SET ROLE kn_app at the start of each test so these scenarios
+verify DB-layer RLS enforcement, not just the application-layer WHERE clauses.
+authenticate_user and refresh_tokens revert to kn_app (via set_app_context) after
+the cross-org email/token lookup, so subsequent queries within the same test
+transaction run under the tenant_isolation RLS policy.  A bug that removes the
+WHERE organization_id clause from service.py would still be caught here.
 """
 import pytest
 from httpx import AsyncClient
