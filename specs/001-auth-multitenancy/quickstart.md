@@ -12,25 +12,31 @@ References: [data-model.md](data-model.md) | [contracts/auth.yaml](contracts/aut
 
 ## Prerequisites
 
+**Tools required**: Docker, Python 3.11+, [`uv`](https://docs.astral.sh/uv/), `jq`, `curl`
+
 ```bash
-# 1. Copy environment template
+# 1. Install Python dependencies (uses uv.lock for reproducibility)
+uv sync --dev
+
+# 2. Copy environment template
 cp .env.example .env
 # Minimum required values in .env:
 #   DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/knowledgeai
-#   JWT_SECRET=<any-random-256-bit-string>
+#   JWT_SECRET=<any-random-256-bit-string>    # generate: python -c "import secrets; print(secrets.token_hex(32))"
 #   ACCESS_TOKEN_EXPIRE_SECONDS=900
 #   REFRESH_TOKEN_EXPIRE_DAYS=7
 #   LOCKOUT_ATTEMPT_THRESHOLD=5
 #   LOCKOUT_DURATION_MINUTES=15
+#   REVOCATION_CACHE_TTL_SECONDS=30
 
-# 2. Start PostgreSQL
+# 3. Start PostgreSQL
 docker compose up -d db
 
-# 3. Run migrations
-alembic upgrade head
+# 4. Run migrations
+uv run alembic upgrade head
 
-# 4. Start the API
-uvicorn src.main:app --reload
+# 5. Start the API (in a separate terminal)
+uv run uvicorn src.main:app --reload
 ```
 
 The API is now available at `http://localhost:8000`. Interactive docs at
@@ -38,22 +44,62 @@ The API is now available at `http://localhost:8000`. Interactive docs at
 
 ---
 
+## Scenario 0 — Seed Super-Admin (required for Scenarios 3e and 5)
+
+The super_admin user is not created by `cli/setup.py` (which creates an org admin). Run
+this once after migrations to seed the super_admin account directly:
+
+```bash
+# Insert super_admin directly via psql (no organization — organization_id is NULL)
+docker exec -i $(docker compose ps -q db) psql -U postgres knowledgeai <<'SQL'
+INSERT INTO users (
+  id, organization_id, email, credential_hash, credential_type,
+  role, status, failed_login_count, token_version, created_at
+) VALUES (
+  gen_random_uuid(),
+  NULL,
+  'superadmin@knowledgeai.internal',
+  -- bcrypt hash of 'SuperAdmin1!' — regenerate for production
+  '$2b$12$zqQ72FIBt3erXGZkdzITfuQC64yOOcKx7YYHCL6wm4ohOyFr87Lpa',
+  'password',
+  'super_admin',
+  'active',
+  0,
+  0,
+  now()
+);
+SQL
+# Expected: INSERT 0 1
+
+# Verify login works immediately after starting the API:
+BASE=http://localhost:8000
+curl -s -X POST $BASE/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"superadmin@knowledgeai.internal","password":"SuperAdmin1!"}' | jq .
+# Expected: { "access_token": "...", "refresh_token": "...", "token_type": "bearer", "expires_in": 900 }
+```
+
+> **Note on the bcrypt hash**: the hash above corresponds to `SuperAdmin1!`. For any real
+> environment regenerate it: `python -c "from passlib.hash import bcrypt; print(bcrypt.hash('YourPassword'))"`.
+
+---
+
 ## Scenario 1 — Initial Setup (US2)
 
 ```bash
 # Bootstrap first organization and admin user
-python cli/setup.py \
+uv run python cli/setup.py \
   --org-name "Acme Bikes" \
   --admin-email admin@acme.example \
-  --admin-password S3cr3tPassword!
+  --admin-password "S3cr3tPassword!"
 
 # Expected: organization + admin user created; exit 0
 
 # Running setup a second time must fail
-python cli/setup.py \
+uv run python cli/setup.py \
   --org-name "Another Org" \
   --admin-email other@example.com \
-  --admin-password password123
+  --admin-password "password123"
 
 # Expected: non-zero exit with message "System already initialized"
 ```
@@ -65,20 +111,16 @@ python cli/setup.py \
 ```bash
 BASE=http://localhost:8000
 
-# 2a. Successful login
-curl -s -X POST $BASE/auth/login \
+# 2a. Successful login — capture both tokens from a single request
+TOKEN_PAIR=$(curl -s -X POST $BASE/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@acme.example","password":"S3cr3tPassword!"}' | jq .
+  -d '{"email":"admin@acme.example","password":"S3cr3tPassword!"}')
+echo $TOKEN_PAIR | jq .
 
 # Expected: { "access_token": "...", "refresh_token": "...", "token_type": "bearer", "expires_in": 900 }
 
-ACCESS=$(curl -s -X POST $BASE/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@acme.example","password":"S3cr3tPassword!"}' | jq -r .access_token)
-
-REFRESH=$(curl -s -X POST $BASE/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@acme.example","password":"S3cr3tPassword!"}' | jq -r .refresh_token)
+ACCESS=$(echo $TOKEN_PAIR | jq -r .access_token)
+REFRESH=$(echo $TOKEN_PAIR | jq -r .refresh_token)
 
 # 2b. Access a protected endpoint
 curl -s $BASE/users -H "Authorization: Bearer $ACCESS" | jq .
@@ -105,11 +147,17 @@ curl -s -X POST $BASE/auth/refresh \
   -d "{\"refresh_token\":\"$REFRESH\"}" | jq .
 # Expected: 401 — old token is already rotated; entire family revoked
 
-# 2f. Logout
-curl -s -X POST $BASE/auth/logout \
-  -H "Authorization: Bearer $ACCESS" \
+# 2f. Logout (re-login to get a fresh pair after the family was revoked in 2e)
+FRESH=$(curl -s -X POST $BASE/auth/login \
   -H "Content-Type: application/json" \
-  -d "{\"refresh_token\":\"$NEW_REFRESH\"}"
+  -d '{"email":"admin@acme.example","password":"S3cr3tPassword!"}')
+FRESH_ACCESS=$(echo $FRESH | jq -r .access_token)
+FRESH_REFRESH=$(echo $FRESH | jq -r .refresh_token)
+
+curl -s -X POST $BASE/auth/logout \
+  -H "Authorization: Bearer $FRESH_ACCESS" \
+  -H "Content-Type: application/json" \
+  -d "{\"refresh_token\":\"$FRESH_REFRESH\"}"
 # Expected: 204 No Content
 ```
 
@@ -118,6 +166,8 @@ curl -s -X POST $BASE/auth/logout \
 ## Scenario 3 — User Management (US3)
 
 ```bash
+BASE=http://localhost:8000
+
 # Log in as admin
 ACCESS=$(curl -s -X POST $BASE/auth/login \
   -H "Content-Type: application/json" \
@@ -153,10 +203,22 @@ curl -s -X POST $BASE/auth/login \
 # Note: requests using an already-issued token are rejected within one revocation
 #       cache window (default 30 s) — see REVOCATION_CACHE_TTL_SECONDS in .env
 
-# 3e. Cross-organization rejection (create a second org to test)
-# First, log in as super_admin (created via DB or CLI directly)
-# Then create a second org, get a user from it, and verify the first admin
-# cannot see or modify that user — 404 or 403 expected
+# 3e. Cross-organization rejection
+# Requires super_admin (see Scenario 0) to create a second org and a user in it.
+# Log in as super_admin, create Org B, add a user, then verify the Acme admin
+# cannot see or modify that user — 404 or 403 expected.
+SA_ACCESS=$(curl -s -X POST $BASE/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"superadmin@knowledgeai.internal","password":"SuperAdmin1!"}' | jq -r .access_token)
+
+ORG_B=$(curl -s -X POST $BASE/organizations \
+  -H "Authorization: Bearer $SA_ACCESS" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Rival Corp"}')
+ORG_B_ID=$(echo $ORG_B | jq -r .id)
+
+# (Seed a user in Org B via DB or admin endpoint with a temp SA token for that org)
+# Then use the Acme ACCESS token to attempt PATCH on Org B's user — expect 404.
 ```
 
 ---
@@ -164,6 +226,13 @@ curl -s -X POST $BASE/auth/login \
 ## Scenario 4 — Audit Log (US4)
 
 ```bash
+BASE=http://localhost:8000
+
+# Log in as admin (run after Scenarios 2 and 3 to ensure audit entries exist)
+ACCESS=$(curl -s -X POST $BASE/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@acme.example","password":"S3cr3tPassword!"}' | jq -r .access_token)
+
 # 4a. Generate some events (login, failed login, logout)
 # ... (use scenarios 2a-2f above)
 
@@ -184,10 +253,12 @@ curl -s "$BASE/audit" \
 ## Scenario 5 — Super-Admin Creates Organization (US5)
 
 ```bash
-# Log in as super_admin (set up via CLI or DB seed)
+BASE=http://localhost:8000
+
+# Log in as super_admin (seeded in Scenario 0)
 SA_ACCESS=$(curl -s -X POST $BASE/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"superadmin@knowledgeai.internal","password":"..."}' | jq -r .access_token)
+  -d '{"email":"superadmin@knowledgeai.internal","password":"SuperAdmin1!"}' | jq -r .access_token)
 
 # 5a. Create a new organization
 NEW_ORG=$(curl -s -X POST $BASE/organizations \
@@ -218,6 +289,8 @@ curl -s $BASE/system/health \
 ## Scenario 6 — Service Account / API Key (FR-017)
 
 ```bash
+BASE=http://localhost:8000
+
 # Log in as admin
 ACCESS=$(curl -s -X POST $BASE/auth/login \
   -H "Content-Type: application/json" \
@@ -245,14 +318,14 @@ curl -s -X POST $BASE/auth/login \
 
 ```bash
 # Unit tests only (no DB required)
-pytest tests/auth/unit/ -v
+uv run pytest tests/auth/unit/ -v
 
 # Integration tests (requires live PostgreSQL)
 docker compose up -d db
-pytest tests/auth/integration/ -v
+uv run pytest tests/auth/integration/ -v
 
 # Full suite with coverage
-pytest --cov=src/auth --cov-report=term-missing
+uv run pytest --cov=src/auth --cov-report=term-missing
 # Expected: ≥ 80% line coverage (Constitution §VIII)
 ```
 
@@ -263,6 +336,6 @@ pytest --cov=src/auth --cov-report=term-missing
 ```bash
 # SC-004: using a valid token from Org A to access Org B data must be rejected 100%
 # Automated in tests/auth/integration/test_multitenancy.py
-pytest tests/auth/integration/test_multitenancy.py -v
+uv run pytest tests/auth/integration/test_multitenancy.py -v
 # Expected: all cross-tenant access attempts return 403 or 404
 ```
