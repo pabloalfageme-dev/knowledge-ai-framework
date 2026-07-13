@@ -3,23 +3,21 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import bcrypt
 import jwt
-from passlib.context import CryptContext
 
 from src.auth.config import auth_settings
-
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # JWT claim key for token version (used to detect revocation)
 _TV_CLAIM = "tv"
 
 
 def hash_password(plain: str) -> str:
-    return _pwd_context.hash(plain)
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd_context.verify(plain, hashed)
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 def generate_api_key() -> tuple[str, str]:

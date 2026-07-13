@@ -44,6 +44,33 @@ The API is now available at `http://localhost:8000`. Interactive docs at
 
 ---
 
+## Troubleshooting: Migrations en estado inconsistente
+
+Si `alembic upgrade head` falla con `relation "users" does not exist` al intentar crear
+`revoked_tokens`, significa que `alembic_version` tiene un stamp de una sesión anterior
+pero las tablas físicas no existen. Solución:
+
+```bash
+# 1. Resetear el stamp a base (no toca la DB, solo borra el registro en alembic_version)
+uv run alembic stamp base
+
+# 2. Aplicar todas las migraciones desde cero
+uv run alembic upgrade head
+```
+
+Si prefieres empezar completamente desde cero (borra todos los datos):
+
+```bash
+# Destruye el volumen de Postgres y recrea el contenedor
+docker compose down -v
+docker compose up -d db
+
+# Aplica las migraciones en DB vacía
+uv run alembic upgrade head
+```
+
+---
+
 ## Scenario 0 — Seed Super-Admin (required for Scenarios 3e and 5)
 
 The super_admin user is not created by `cli/setup.py` (which creates an org admin). Run
@@ -217,8 +244,34 @@ ORG_B=$(curl -s -X POST $BASE/organizations \
   -d '{"name":"Rival Corp"}')
 ORG_B_ID=$(echo $ORG_B | jq -r .id)
 
-# (Seed a user in Org B via DB or admin endpoint with a temp SA token for that org)
-# Then use the Acme ACCESS token to attempt PATCH on Org B's user — expect 404.
+# Seed a user in Org B directly via psql (no API endpoint exists to create users
+# in another org — POST /users is always scoped to the caller's organization)
+USER_B_ID=$(docker exec -i $(docker compose ps -q db) psql -U postgres knowledgeai -At <<SQL
+INSERT INTO users (
+  id, organization_id, email, credential_hash, credential_type,
+  role, status, failed_login_count, token_version, created_at
+) VALUES (
+  gen_random_uuid(),
+  '$ORG_B_ID',
+  'bob@rivalcorp.example',
+  '\$2b\$12\$zqQ72FIBt3erXGZkdzITfuQC64yOOcKx7YYHCL6wm4ohOyFr87Lpa',
+  'password',
+  'user',
+  'active',
+  0,
+  0,
+  now()
+) RETURNING id;
+SQL
+)
+echo "Org B user ID: $USER_B_ID"
+
+# Attempt to PATCH Org B's user using the Acme admin token — must be 404
+curl -s -X PATCH $BASE/users/$USER_B_ID \
+  -H "Authorization: Bearer $ACCESS" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"inactive"}' | jq .
+# Expected: 404 — user exists but is not in Acme Bikes' organization
 ```
 
 ---

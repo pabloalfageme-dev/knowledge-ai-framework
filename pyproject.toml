@@ -12,7 +12,6 @@ dependencies = [
     "uvicorn[standard]>=0.30.0,<1.0.0",
     "pyjwt>=2.9.0,<3.0.0",
     # Auth / password hashing
-    "passlib[bcrypt]==1.7.4",
     "bcrypt==4.3.0",
     # DB
     "sqlalchemy>=2.0.0,<3.0.0",
