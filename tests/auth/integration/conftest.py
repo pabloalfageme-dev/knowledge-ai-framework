@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.auth.models import Base, Organization, User
 from src.auth.security import hash_password
 from src.core.config import settings
-from src.core.database import get_db
+from src.core.database import get_db, set_admin_context, set_rls_context
 from src.main import app
 
 # ── Engine (session-scoped: create tables once per test session) ─────────────
@@ -75,6 +75,9 @@ async def test_engine():
             )
     yield engine
     async with engine.begin() as conn:
+        # Connections acquired by db_session have SET ROLE kn_app (connection-level).
+        # RESET ROLE reverts to the session authorization (postgres) so DDL ops succeed.
+        await conn.execute(text("RESET ROLE"))
         for table in ("users", "audit_log", "refresh_tokens"):
             await conn.execute(text(f"DROP POLICY IF EXISTS tenant_isolation ON {table}"))
             await conn.execute(text(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY"))
@@ -91,6 +94,13 @@ async def db_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
         test_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
     )
     async with session_factory() as session:
+        # SET ROLE kn_app (connection-level, not LOCAL) so all queries in this test
+        # run under the kn_app role and are subject to the tenant_isolation RLS policy.
+        # This makes T041 cross-tenant tests meaningful: RLS blocks data leaks, not
+        # just application-layer WHERE clauses. Service functions that need cross-org
+        # access (login, token refresh, get_current_user) call set_admin_context()
+        # locally and then revert with set_app_context() when done.
+        await session.execute(text("SET ROLE kn_app"))
         # Patch commit → flush so handler commits don't escape the test transaction.
         # The fixture calls session.rollback() at teardown to undo all changes.
         session.commit = session.flush  # type: ignore[method-assign]
@@ -135,6 +145,8 @@ async def make_user(db_session: AsyncSession):
         password: str = "TestPass1!",
         role: str = "user",
     ) -> User:
+        # WITH CHECK on users requires app.current_org_id = organization_id under kn_app.
+        await set_rls_context(db_session, org.id)
         user = User(
             organization_id=org.id,
             email=email,
@@ -162,6 +174,12 @@ async def make_admin(make_user):
 @pytest_asyncio.fixture
 async def make_super_admin(db_session: AsyncSession):
     async def _make(email: str, password: str = "TestPass1!") -> User:
+        # organization_id=None: RLS WITH CHECK (org_id = current_setting(...)) evaluates to
+        # NULL = <uuid> → NULL (not TRUE) and rejects the INSERT under kn_app.
+        # Escalate to kn_admin (BYPASSRLS) for this insert.
+        # SET LOCAL ROLE is transaction-scoped: kn_admin applies for the rest of this test's
+        # transaction, which is acceptable since super_admin test scenarios use kn_admin ops.
+        await set_admin_context(db_session)
         user = User(
             organization_id=None,
             email=email,

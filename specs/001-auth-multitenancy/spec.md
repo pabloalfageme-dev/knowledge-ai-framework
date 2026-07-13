@@ -234,8 +234,10 @@ returns aggregate counts with no user-identifiable data.
   tenant boundary; all data is scoped to an organization.
 - **User**: identifier, organization_id, email, hashed credential (password hash or API key
   hash), role, status (active/inactive), failed_login_count, locked_until (nullable),
-  created_at — belongs to exactly one organization. `email` carries a system-wide unique
-  constraint (not scoped per organization).
+  created_at — belongs to exactly one organization, with one explicit exception: `super_admin`
+  users are framework-level (FR-004) and have `organization_id = NULL`; `organization_id` is
+  therefore nullable and that nullability is reserved exclusively for the `super_admin` role.
+  `email` carries a system-wide unique constraint (not scoped per organization).
 - **AuditLogEntry**: identifier, occurred_at (UTC), user_id (nullable), organization_id
   (nullable), event_type (LOGIN_SUCCESS | LOGIN_FAILURE | LOGOUT | TOKEN_REFRESH | ACCOUNT_LOCKED),
   ip_address — append-only, never modified after creation.

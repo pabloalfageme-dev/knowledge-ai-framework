@@ -51,3 +51,13 @@ async def set_admin_context(session: AsyncSession) -> None:
     SET LOCAL scopes the role change to the current transaction only.
     """
     await session.execute(text("SET LOCAL ROLE kn_admin"))
+
+
+async def set_app_context(session: AsyncSession) -> None:
+    """Revert from kn_admin back to kn_app for RLS-enforced tenant operations.
+
+    Call after a cross-org admin lookup so the remainder of the request runs
+    under kn_app and is subject to the tenant_isolation RLS policy.
+    SET LOCAL ensures the reversion is scoped to the current transaction.
+    """
+    await session.execute(text("SET LOCAL ROLE kn_app"))

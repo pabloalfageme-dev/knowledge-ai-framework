@@ -156,10 +156,12 @@ aligning with Constitution principle VI.
 
 **Per-request authentication check**:
 The `get_current_user` FastAPI dependency performs one DB query after JWT signature
-verification, joining `users` + `organizations` to assert:
+verification, LEFT JOIN-ing `users` + `organizations` (LEFT JOIN is required because
+`super_admin` users have `organization_id = NULL` and must not be excluded by an INNER JOIN):
 1. `users.status = 'active'`
 2. `users.token_version = token.tv` (mismatch means the user's tokens were revoked)
-3. `organizations.status = 'active'`
+3. `organizations.status = 'active'` — asserted only when `organization_id IS NOT NULL`;
+   skipped for `super_admin` (no org to check)
 
 If any condition fails, the request is rejected with 401. This single query covers all
 deactivation and revocation scenarios with no extra table needed.

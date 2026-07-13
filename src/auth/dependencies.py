@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth.models import Organization, User
 from src.auth.security import decode_access_token
-from src.core.database import get_db, set_rls_context
+from src.core.database import get_db, set_admin_context, set_app_context, set_rls_context
 
 _logger = logging.getLogger(__name__)
 
@@ -37,9 +37,14 @@ async def get_current_user(
     if user_id is None:
         raise _CREDENTIALS_EXCEPTION
 
+    # kn_admin bypasses RLS so we can look up any user (including super_admin with org=None)
+    # before the org context is known. set_app_context reverts to kn_app afterwards so
+    # the request handler runs under the tenant_isolation RLS policy.
+    await set_admin_context(db)
     result = await db.execute(
         select(User, Organization.status.label("org_status"))
-        .join(Organization, User.organization_id == Organization.id)
+        # LEFT JOIN: super_admin users have organization_id=None and must not be excluded
+        .join(Organization, User.organization_id == Organization.id, isouter=True)
         .where(User.id == user_id)
     )
     row = result.one_or_none()
@@ -52,7 +57,8 @@ async def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive"
         )
-    if org_status != "active":
+    # org_status is None for super_admin (no org) — only check when an org exists
+    if user.organization_id is not None and org_status != "active":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Organization is inactive"
         )
@@ -62,6 +68,8 @@ async def get_current_user(
         )
 
     await set_rls_context(db, user.organization_id)
+    # Revert to kn_app so request handlers are subject to the RLS policy
+    await set_app_context(db)
     return user
 
 

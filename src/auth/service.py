@@ -26,6 +26,7 @@ from src.auth.security import (
     hash_refresh_token,
     verify_password,
 )
+from src.core.database import set_admin_context, set_rls_context
 
 _logger = logging.getLogger(__name__)
 
@@ -53,7 +54,11 @@ async def create_first_org_and_admin(
 
     org = Organization(name=org_name)
     session.add(org)
-    await session.flush()  # populate org.id
+    await session.flush()  # populate org.id before setting RLS context
+
+    # RLS WITH CHECK on users requires app.current_org_id = organization_id.
+    # Set it to the new org's id before the user INSERT so the check passes under kn_app.
+    await set_rls_context(session, org.id)
 
     user = User(
         organization_id=org.id,
@@ -126,6 +131,11 @@ async def authenticate_user(
     password: str,
     ip_address: str,
 ) -> TokenPair:
+    # Email lookup is cross-org by design; kn_admin bypasses RLS for this query.
+    # All subsequent writes in this function (failed_login_count, audit log,
+    # refresh token) run under kn_admin too — legitimate since they target the
+    # user being authenticated and don't cross tenant boundaries.
+    await set_admin_context(session)
     result = await session.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
@@ -175,6 +185,10 @@ async def refresh_tokens(
     raw_refresh_token: uuid.UUID,
     ip_address: str,
 ) -> TokenPair:
+    # refresh_tokens has RLS; org context is unknown at this point, so elevate
+    # to kn_admin for the initial lookup. All subsequent ops in this function
+    # are for the token owner and don't cross tenant boundaries.
+    await set_admin_context(session)
     token_hash = hash_refresh_token(str(raw_refresh_token))
     result = await session.execute(
         select(RefreshToken).where(RefreshToken.token_hash == token_hash)
@@ -207,16 +221,21 @@ async def refresh_tokens(
     rt.used_at = now
     await session.flush()
 
+    # LEFT JOIN: super_admin has organization_id=None; INNER JOIN would drop that row.
     user_result = await session.execute(
-        select(User)
-        .join(Organization, User.organization_id == Organization.id)
+        select(User, Organization.status.label("org_status"))
+        .join(Organization, User.organization_id == Organization.id, isouter=True)
         .where(User.id == rt.user_id)
         .where(User.status == "active")
-        .where(Organization.status == "active")
     )
-    user = user_result.scalar_one_or_none()
+    row = user_result.one_or_none()
 
-    if user is None:
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="User or organization is inactive"
+        )
+    user, org_status = row
+    if user.organization_id is not None and org_status != "active":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="User or organization is inactive"
         )
@@ -233,6 +252,10 @@ async def logout(
     raw_refresh_token: uuid.UUID,
     ip_address: str,
 ) -> None:
+    # super_admin has organization_id=None: app.current_org_id is unset, so kn_app
+    # cannot find their refresh tokens via the RLS policy. Escalate to kn_admin.
+    if current_user.organization_id is None:
+        await set_admin_context(session)
     token_hash = hash_refresh_token(str(raw_refresh_token))
     result = await session.execute(
         select(RefreshToken)
