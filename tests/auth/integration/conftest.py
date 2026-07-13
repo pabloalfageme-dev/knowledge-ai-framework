@@ -3,10 +3,8 @@
 Requires a live PostgreSQL instance. Set DATABASE_URL in the environment or a .env file.
 Each test runs inside a transaction that is rolled back on teardown — no persistent state.
 """
-import asyncio
 from collections.abc import AsyncGenerator
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
@@ -19,13 +17,6 @@ from src.core.database import get_db, set_admin_context, set_rls_context
 from src.main import app
 
 # ── Engine (session-scoped: create tables once per test session) ─────────────
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -56,6 +47,10 @@ async def test_engine():
         for table in ("users", "audit_log", "refresh_tokens"):
             await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
             await conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
+            # DROP + CREATE is idempotent: handles leftover policies from a crashed run.
+            await conn.execute(
+                text(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
+            )
             await conn.execute(
                 text(
                     f"""
@@ -73,11 +68,11 @@ async def test_engine():
             await conn.execute(
                 text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO kn_admin")
             )
+        # revoked_tokens: global JTI blocklist, no RLS needed
+        await conn.execute(text("GRANT SELECT, INSERT ON revoked_tokens TO kn_app"))
+        await conn.execute(text("GRANT SELECT, INSERT ON revoked_tokens TO kn_admin"))
     yield engine
     async with engine.begin() as conn:
-        # Connections acquired by db_session have SET ROLE kn_app (connection-level).
-        # RESET ROLE reverts to the session authorization (postgres) so DDL ops succeed.
-        await conn.execute(text("RESET ROLE"))
         for table in ("users", "audit_log", "refresh_tokens"):
             await conn.execute(text(f"DROP POLICY IF EXISTS tenant_isolation ON {table}"))
             await conn.execute(text(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY"))
@@ -94,13 +89,6 @@ async def db_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
         test_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
     )
     async with session_factory() as session:
-        # SET ROLE kn_app (connection-level, not LOCAL) so all queries in this test
-        # run under the kn_app role and are subject to the tenant_isolation RLS policy.
-        # This makes T041 cross-tenant tests meaningful: RLS blocks data leaks, not
-        # just application-layer WHERE clauses. Service functions that need cross-org
-        # access (login, token refresh, get_current_user) call set_admin_context()
-        # locally and then revert with set_app_context() when done.
-        await session.execute(text("SET ROLE kn_app"))
         # Patch commit → flush so handler commits don't escape the test transaction.
         # The fixture calls session.rollback() at teardown to undo all changes.
         session.commit = session.flush  # type: ignore[method-assign]

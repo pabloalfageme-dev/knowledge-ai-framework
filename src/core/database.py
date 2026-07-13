@@ -35,10 +35,11 @@ async def set_rls_context(session: AsyncSession, org_id: uuid.UUID | None) -> No
     """Set the PostgreSQL session variable used by RLS policies.
 
     Must be called inside a transaction before any tenant-scoped query.
+    Uses set_config() because SET LOCAL does not accept $N placeholders.
     """
     if org_id is not None:
         await session.execute(
-            text("SET LOCAL app.current_org_id = :org_id"),
+            text("SELECT set_config('app.current_org_id', :org_id, true)"),
             {"org_id": str(org_id)},
         )
 

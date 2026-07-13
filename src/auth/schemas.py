@@ -3,7 +3,6 @@ from datetime import datetime
 
 from pydantic import BaseModel, EmailStr
 
-
 # ── Setup ────────────────────────────────────────────────────────────────────
 
 class SetupRequest(BaseModel):

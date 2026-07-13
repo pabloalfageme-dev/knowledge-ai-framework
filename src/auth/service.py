@@ -17,7 +17,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth.config import auth_settings
-from src.auth.models import AuditLogEntry, Organization, RefreshToken, User
+from src.auth.models import AuditLogEntry, Organization, RefreshToken, RevokedToken, User
 from src.auth.schemas import TokenPair
 from src.auth.security import (
     create_access_token,
@@ -136,11 +136,17 @@ async def authenticate_user(
     # refresh token) run under kn_admin too — legitimate since they target the
     # user being authenticated and don't cross tenant boundaries.
     await set_admin_context(session)
-    result = await session.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
+    result = await session.execute(
+        select(User, Organization.status.label("org_status"))
+        .join(Organization, User.organization_id == Organization.id, isouter=True)
+        .where(User.email == email)
+    )
+    row = result.one_or_none()
 
-    if user is None:
+    if row is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    user, org_status = row
 
     now = datetime.now(UTC)
     if user.locked_until and user.locked_until > now:
@@ -169,6 +175,10 @@ async def authenticate_user(
     if user.status != "active":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is not active"
+        )
+    if user.organization_id is not None and org_status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Organization is inactive"
         )
 
     user.failed_login_count = 0
@@ -250,6 +260,8 @@ async def logout(
     session: AsyncSession,
     current_user: User,
     raw_refresh_token: uuid.UUID,
+    access_jti: str,
+    access_exp: datetime,
     ip_address: str,
 ) -> None:
     # super_admin has organization_id=None: app.current_org_id is unset, so kn_app
@@ -266,6 +278,12 @@ async def logout(
     if rt is not None:
         rt.used_at = datetime.now(UTC)
         await session.flush()
+
+    # Blocklist the access JTI so it is rejected within REVOCATION_CACHE_TTL_SECONDS
+    revoked = RevokedToken(jti=access_jti, user_id=current_user.id, expires_at=access_exp)
+    session.add(revoked)
+    await session.flush()
+
     await write_audit_entry(
         session,
         "LOGOUT",
@@ -380,3 +398,110 @@ async def create_service_account(
     session.add(user)
     await session.flush()
     return user, raw_api_key
+
+
+# ── Phase 6 (US4) ─────────────────────────────────────────────────────────────
+
+async def get_audit_log(
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    event_type: str | None = None,
+    user_id: uuid.UUID | None = None,
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[list[AuditLogEntry], int]:
+    """Return paginated audit entries for org_id, plus the unfiltered total count.
+
+    RLS also enforces org scoping when running under kn_app; the WHERE clause
+    is the application-layer guard.
+    """
+    base = select(AuditLogEntry).where(AuditLogEntry.organization_id == org_id)
+
+    if event_type is not None:
+        base = base.where(AuditLogEntry.event_type == event_type)
+    if user_id is not None:
+        base = base.where(AuditLogEntry.user_id == user_id)
+    if from_dt is not None:
+        base = base.where(AuditLogEntry.occurred_at >= from_dt)
+    if to_dt is not None:
+        base = base.where(AuditLogEntry.occurred_at <= to_dt)
+
+    count_result = await session.execute(
+        select(func.count()).select_from(base.subquery())
+    )
+    total = count_result.scalar_one()
+
+    items_result = await session.execute(
+        base.order_by(AuditLogEntry.occurred_at.desc()).limit(limit).offset(offset)
+    )
+    items = list(items_result.scalars().all())
+    return items, total
+
+
+# ── Phase 7 (US5) ─────────────────────────────────────────────────────────────
+
+async def create_organization(
+    session: AsyncSession,
+    name: str,
+) -> Organization:
+    """Create a new organization. Raises 409 on duplicate name."""
+    from sqlalchemy.exc import IntegrityError
+
+    from src.core.database import set_admin_context
+
+    await set_admin_context(session)
+    org = Organization(name=name)
+    session.add(org)
+    try:
+        await session.flush()
+    except IntegrityError as err:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Organization name already exists"
+        ) from err
+    return org
+
+
+async def deactivate_organization(
+    session: AsyncSession,
+    org_id: uuid.UUID,
+) -> Organization:
+    """Set an organization's status to inactive. Raises 404 if not found."""
+    from src.core.database import set_admin_context
+
+    await set_admin_context(session)
+    result = await session.execute(select(Organization).where(Organization.id == org_id))
+    org = result.scalar_one_or_none()
+    if org is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    org.status = "inactive"
+    await session.flush()
+    return org
+
+
+async def get_system_health(session: AsyncSession) -> dict:
+    """Return aggregate org/user counts with no user-identifiable data."""
+    from src.core.database import set_admin_context
+
+    await set_admin_context(session)
+
+    org_counts = await session.execute(
+        select(
+            func.count().label("total"),
+            func.count(Organization.id).filter(Organization.status == "active").label("active"),
+        )
+    )
+    org_row = org_counts.one()
+
+    user_count_result = await session.execute(
+        select(func.count()).where(User.status == "active")
+    )
+    active_user_count = user_count_result.scalar_one()
+
+    return {
+        "organization_count": org_row.total,
+        "active_organization_count": org_row.active,
+        "active_user_count": active_user_count,
+    }

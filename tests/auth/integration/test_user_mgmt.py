@@ -2,7 +2,6 @@
 import pytest
 from httpx import AsyncClient
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _setup_org(client: AsyncClient, org: str, email: str, pw: str) -> dict:
@@ -28,22 +27,22 @@ def _auth(tokens: dict) -> dict:
 
 @pytest.mark.asyncio
 async def test_create_user_who_can_login(client: AsyncClient) -> None:
-    await _setup_org(client, "Alpha", "admin@alpha.test", "AdminP@ss1!")
-    admin = await _login(client, "admin@alpha.test", "AdminP@ss1!")
+    await _setup_org(client, "Alpha", "admin@alpha.example", "AdminP@ss1!")
+    admin = await _login(client, "admin@alpha.example", "AdminP@ss1!")
 
     r = await client.post(
         "/users",
-        json={"email": "user1@alpha.test", "password": "UserP@ss1!", "role": "user"},
+        json={"email": "user1@alpha.example", "password": "UserP@ss1!", "role": "user"},
         headers=_auth(admin),
     )
     assert r.status_code == 201
     data = r.json()
-    assert data["email"] == "user1@alpha.test"
+    assert data["email"] == "user1@alpha.example"
     assert data["role"] == "user"
     assert data["status"] == "active"
 
     # New user can log in immediately
-    user_tokens = await _login(client, "user1@alpha.test", "UserP@ss1!")
+    user_tokens = await _login(client, "user1@alpha.example", "UserP@ss1!")
     assert "access_token" in user_tokens
 
 
@@ -51,20 +50,20 @@ async def test_create_user_who_can_login(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_deactivate_user_blocks_login(client: AsyncClient) -> None:
-    await _setup_org(client, "Beta", "admin@beta2.test", "AdminP@ss2!")
-    admin = await _login(client, "admin@beta2.test", "AdminP@ss2!")
+    await _setup_org(client, "Beta", "admin@beta2.example", "AdminP@ss2!")
+    admin = await _login(client, "admin@beta2.example", "AdminP@ss2!")
 
     # Create user
     r = await client.post(
         "/users",
-        json={"email": "user2@beta2.test", "password": "UserP@ss2!", "role": "user"},
+        json={"email": "user2@beta2.example", "password": "UserP@ss2!", "role": "user"},
         headers=_auth(admin),
     )
     assert r.status_code == 201
     user_id = r.json()["id"]
 
     # Verify user can log in
-    await _login(client, "user2@beta2.test", "UserP@ss2!")
+    await _login(client, "user2@beta2.example", "UserP@ss2!")
 
     # Deactivate the user
     r = await client.patch(
@@ -78,7 +77,7 @@ async def test_deactivate_user_blocks_login(client: AsyncClient) -> None:
     # Deactivated user cannot log in
     r = await client.post(
         "/auth/login",
-        json={"email": "user2@beta2.test", "password": "UserP@ss2!"},
+        json={"email": "user2@beta2.example", "password": "UserP@ss2!"},
     )
     assert r.status_code == 401
 
@@ -86,17 +85,21 @@ async def test_deactivate_user_blocks_login(client: AsyncClient) -> None:
 # ── Scenario 3: cross-org action rejected (404) ───────────────────────────────
 
 @pytest.mark.asyncio
-async def test_cross_org_action_rejected(client: AsyncClient) -> None:
-    await _setup_org(client, "Gamma1", "admin@gamma1.test", "AdminP@ss3!")
-    await _setup_org(client, "Gamma2", "admin@gamma2.test", "AdminP@ss4!")
+async def test_cross_org_action_rejected(
+    client: AsyncClient, make_org, make_admin, make_user
+) -> None:
+    # POST /setup is a one-time bootstrap. Create org1 via setup, org2 directly via fixtures.
+    await _setup_org(client, "Gamma1", "admin@gamma1.example", "AdminP@ss3!")
+    org2 = await make_org("Gamma2")
+    await make_admin(org2, "admin@gamma2.example", "AdminP@ss4!")
 
-    admin1 = await _login(client, "admin@gamma1.test", "AdminP@ss3!")
+    admin1 = await _login(client, "admin@gamma1.example", "AdminP@ss3!")
+    admin2 = await _login(client, "admin@gamma2.example", "AdminP@ss4!")
 
-    # Get a user_id from org2 — we need to create one first via admin2
-    admin2 = await _login(client, "admin@gamma2.test", "AdminP@ss4!")
+    # Create a user in org2 via admin2
     r = await client.post(
         "/users",
-        json={"email": "victim@gamma2.test", "password": "VictimP@ss!", "role": "user"},
+        json={"email": "victim@gamma2.example", "password": "VictimP@ss!", "role": "user"},
         headers=_auth(admin2),
     )
     assert r.status_code == 201
@@ -115,13 +118,13 @@ async def test_cross_org_action_rejected(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_role_change_reflected_in_next_token(client: AsyncClient) -> None:
-    await _setup_org(client, "Delta", "admin@delta2.test", "AdminP@ss5!")
-    admin = await _login(client, "admin@delta2.test", "AdminP@ss5!")
+    await _setup_org(client, "Delta", "admin@delta2.example", "AdminP@ss5!")
+    admin = await _login(client, "admin@delta2.example", "AdminP@ss5!")
 
     # Create a plain user
     r = await client.post(
         "/users",
-        json={"email": "promoted@delta2.test", "password": "UserP@ss5!", "role": "user"},
+        json={"email": "promoted@delta2.example", "password": "UserP@ss5!", "role": "user"},
         headers=_auth(admin),
     )
     user_id = r.json()["id"]
@@ -136,7 +139,7 @@ async def test_role_change_reflected_in_next_token(client: AsyncClient) -> None:
     assert r.json()["role"] == "admin"
 
     # New login issues a token with updated role
-    new_tokens = await _login(client, "promoted@delta2.test", "UserP@ss5!")
+    new_tokens = await _login(client, "promoted@delta2.example", "UserP@ss5!")
 
     # The new token should work with admin-only endpoints
     r = await client.get("/users", headers=_auth(new_tokens))
@@ -147,12 +150,12 @@ async def test_role_change_reflected_in_next_token(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_service_account_login_with_api_key(client: AsyncClient) -> None:
-    await _setup_org(client, "Epsilon", "admin@epsilon2.test", "AdminP@ss6!")
-    admin = await _login(client, "admin@epsilon2.test", "AdminP@ss6!")
+    await _setup_org(client, "Epsilon", "admin@epsilon2.example", "AdminP@ss6!")
+    admin = await _login(client, "admin@epsilon2.example", "AdminP@ss6!")
 
     r = await client.post(
         "/service-accounts",
-        json={"email": "svc@epsilon2.test", "role": "user"},
+        json={"email": "svc@epsilon2.example", "role": "user"},
         headers=_auth(admin),
     )
     assert r.status_code == 201
@@ -163,7 +166,7 @@ async def test_service_account_login_with_api_key(client: AsyncClient) -> None:
     # Service account logs in using the raw API key as its password
     r = await client.post(
         "/auth/login",
-        json={"email": "svc@epsilon2.test", "password": raw_api_key},
+        json={"email": "svc@epsilon2.example", "password": raw_api_key},
     )
     assert r.status_code == 200
     assert "access_token" in r.json()

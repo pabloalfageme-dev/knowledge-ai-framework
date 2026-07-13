@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth.models import AuditLogEntry
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _setup_org(client: AsyncClient, org_name: str, email: str, password: str) -> None:
@@ -25,10 +24,12 @@ async def _login(client: AsyncClient, email: str, password: str) -> dict:
 # ── Scenario 1: valid login returns tokens + audit entry ─────────────────────
 
 @pytest.mark.asyncio
-async def test_valid_login_returns_token_pair(client: AsyncClient, db_session: AsyncSession) -> None:
-    await _setup_org(client, "Acme", "admin@acme.test", "P@ssword1!")
+async def test_valid_login_returns_token_pair(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _setup_org(client, "Acme", "admin@acme.example", "P@ssword1!")
 
-    resp = await _login(client, "admin@acme.test", "P@ssword1!")
+    resp = await _login(client, "admin@acme.example", "P@ssword1!")
     assert resp.status_code == 200
     data = resp.json()
     assert "access_token" in data
@@ -48,9 +49,9 @@ async def test_valid_login_returns_token_pair(client: AsyncClient, db_session: A
 async def test_wrong_password_returns_401_and_audit(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    await _setup_org(client, "BetaCorp", "admin@beta.test", "CorrectP@ss1!")
+    await _setup_org(client, "BetaCorp", "admin@beta.example", "CorrectP@ss1!")
 
-    resp = await _login(client, "admin@beta.test", "WrongPassword!")
+    resp = await _login(client, "admin@beta.example", "WrongPassword!")
     assert resp.status_code == 401
 
     result = await db_session.execute(
@@ -63,18 +64,18 @@ async def test_wrong_password_returns_401_and_audit(
 
 @pytest.mark.asyncio
 async def test_deactivated_user_returns_401(client: AsyncClient, db_session: AsyncSession) -> None:
-    await _setup_org(client, "GammaCorp", "admin@gamma.test", "P@ssword3!")
+    await _setup_org(client, "GammaCorp", "admin@gamma.example", "P@ssword3!")
 
     from src.auth.models import User
 
     result = await db_session.execute(
-        select(User).where(User.email == "admin@gamma.test")
+        select(User).where(User.email == "admin@gamma.example")
     )
     user = result.scalar_one()
     user.status = "inactive"
     await db_session.flush()
 
-    resp = await _login(client, "admin@gamma.test", "P@ssword3!")
+    resp = await _login(client, "admin@gamma.example", "P@ssword3!")
     assert resp.status_code == 401
 
 
@@ -82,9 +83,9 @@ async def test_deactivated_user_returns_401(client: AsyncClient, db_session: Asy
 
 @pytest.mark.asyncio
 async def test_valid_token_accesses_protected_endpoint(client: AsyncClient) -> None:
-    await _setup_org(client, "DeltaCorp", "admin@delta.test", "P@ssword4!")
+    await _setup_org(client, "DeltaCorp", "admin@delta.example", "P@ssword4!")
 
-    login_resp = await _login(client, "admin@delta.test", "P@ssword4!")
+    login_resp = await _login(client, "admin@delta.example", "P@ssword4!")
     assert login_resp.status_code == 200
     tokens = login_resp.json()
 
@@ -101,9 +102,9 @@ async def test_valid_token_accesses_protected_endpoint(client: AsyncClient) -> N
 
 @pytest.mark.asyncio
 async def test_refresh_rotates_tokens(client: AsyncClient) -> None:
-    await _setup_org(client, "EpsilonCorp", "admin@epsilon.test", "P@ssword5!")
+    await _setup_org(client, "EpsilonCorp", "admin@epsilon.example", "P@ssword5!")
 
-    login_resp = await _login(client, "admin@epsilon.test", "P@ssword5!")
+    login_resp = await _login(client, "admin@epsilon.example", "P@ssword5!")
     tokens = login_resp.json()
     old_refresh = tokens["refresh_token"]
 
@@ -118,9 +119,9 @@ async def test_refresh_rotates_tokens(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_refresh_replay_returns_401(client: AsyncClient) -> None:
-    await _setup_org(client, "ZetaCorp", "admin@zeta.test", "P@ssword6!")
+    await _setup_org(client, "ZetaCorp", "admin@zeta.example", "P@ssword6!")
 
-    login_resp = await _login(client, "admin@zeta.test", "P@ssword6!")
+    login_resp = await _login(client, "admin@zeta.example", "P@ssword6!")
     tokens = login_resp.json()
     refresh_token = tokens["refresh_token"]
 
@@ -137,9 +138,9 @@ async def test_refresh_replay_returns_401(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_logout_returns_204(client: AsyncClient) -> None:
-    await _setup_org(client, "EtaCorp", "admin@eta.test", "P@ssword7!")
+    await _setup_org(client, "EtaCorp", "admin@eta.example", "P@ssword7!")
 
-    login_resp = await _login(client, "admin@eta.test", "P@ssword7!")
+    login_resp = await _login(client, "admin@eta.example", "P@ssword7!")
     tokens = login_resp.json()
 
     logout_resp = await client.post(

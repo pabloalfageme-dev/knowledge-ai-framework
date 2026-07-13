@@ -7,6 +7,7 @@ class AuthSettings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     LOCKOUT_ATTEMPT_THRESHOLD: int = 5
     LOCKOUT_DURATION_MINUTES: int = 15
+    REVOCATION_CACHE_TTL_SECONDS: int = 30
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

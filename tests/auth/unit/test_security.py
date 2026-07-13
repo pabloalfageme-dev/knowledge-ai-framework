@@ -1,6 +1,5 @@
 """Unit tests for src/auth/security.py (T028)."""
 import hashlib
-import time
 import uuid
 
 import jwt
@@ -74,6 +73,7 @@ def test_create_access_token_with_null_org():
 
 def test_decode_access_token_raises_on_expired():
     from datetime import UTC, datetime, timedelta
+
     from src.auth.config import auth_settings
 
     user_id = uuid.uuid4()
@@ -97,7 +97,6 @@ def test_decode_access_token_raises_on_wrong_secret():
     user_id = uuid.uuid4()
     token, _ = create_access_token(user_id, None, "user", 1)
 
-    from src.auth.config import auth_settings
     import jwt as _jwt
 
     tampered = _jwt.encode({"sub": str(user_id)}, "wrong-secret", algorithm="HS256")
