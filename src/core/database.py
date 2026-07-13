@@ -41,3 +41,13 @@ async def set_rls_context(session: AsyncSession, org_id: uuid.UUID | None) -> No
             text("SET LOCAL app.current_org_id = :org_id"),
             {"org_id": str(org_id)},
         )
+
+
+async def set_admin_context(session: AsyncSession) -> None:
+    """Elevate the current transaction to the kn_admin role (BYPASSRLS).
+
+    Use exclusively for cross-org super-admin operations (FR-012 aggregates,
+    org lifecycle). kn_admin must be GRANTED to the login role in the migration.
+    SET LOCAL scopes the role change to the current transaction only.
+    """
+    await session.execute(text("SET LOCAL ROLE kn_admin"))

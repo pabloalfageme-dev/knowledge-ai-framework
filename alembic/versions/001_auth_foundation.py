@@ -39,6 +39,10 @@ def upgrade() -> None:
         $$;
     """)
 
+    # Allow kn_app sessions to escalate to kn_admin via SET LOCAL ROLE for
+    # cross-org super-admin operations (FR-012 aggregates, org lifecycle).
+    op.execute("GRANT kn_admin TO kn_app;")
+
     # ── Tables ───────────────────────────────────────────────────────────────
     op.create_table(
         "organizations",
