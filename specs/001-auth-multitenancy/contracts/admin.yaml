@@ -1,0 +1,457 @@
+openapi: "3.1.0"
+info:
+  title: KnowledgeAI Admin API
+  version: "1.0.0"
+  description: >
+    User management (org admin), organization management (super-admin),
+    service account management, and audit log endpoints.
+
+paths:
+
+  # ── User Management (org admin, FR-006–009, US3) ─────────────────────────
+
+  /users:
+    get:
+      summary: List users in caller's organization (US3)
+      operationId: listUsers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, inactive]
+      responses:
+        "200":
+          description: Users scoped to caller's organization only
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      summary: Create a human user in caller's organization (FR-006, US3)
+      operationId: createUser
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "201":
+          description: User created; can log in immediately
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Email already in use
+
+  /users/{user_id}:
+    patch:
+      summary: Update user status or role (FR-007, FR-008, US3)
+      operationId: updateUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: User updated; role change effective on next token issuance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Forbidden — caller is not an admin of the target user's organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: User not found in caller's organization
+
+  /users/{user_id}/unlock:
+    post:
+      summary: Manually unlock a locked account (FR-016, US3)
+      operationId: unlockUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Account unlocked; failed_login_count reset to 0
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: User not found in caller's organization
+
+  # ── Service Account Management (FR-017, US3) ──────────────────────────────
+
+  /service-accounts:
+    post:
+      summary: Create a service account and generate an API key (FR-017, US3)
+      operationId: createServiceAccount
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateServiceAccountRequest"
+      responses:
+        "201":
+          description: >
+            Service account created; API key returned once in plain text —
+            not retrievable again after this response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceAccountCreated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ── Audit Log (FR-009, US4) ───────────────────────────────────────────────
+
+  /audit:
+    get:
+      summary: Retrieve auth audit log for caller's organization (FR-009, US4)
+      operationId: getAuditLog
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: event_type
+          in: query
+          schema:
+            type: string
+            enum: [LOGIN_SUCCESS, LOGIN_FAILURE, LOGOUT, TOKEN_REFRESH, ACCOUNT_LOCKED]
+        - name: user_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 500
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Audit entries for caller's organization, ordered by occurred_at DESC
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditEntry"
+                  total:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ── Organization Management (super-admin, FR-010–012, US5) ────────────────
+
+  /organizations:
+    post:
+      summary: Create a new client organization (FR-010, US5)
+      operationId: createOrganization
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrganizationRequest"
+      responses:
+        "201":
+          description: Organization created and ready to accept users
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Organization name already in use
+
+  /organizations/{org_id}:
+    patch:
+      summary: Deactivate an organization (FR-011, US5)
+      operationId: updateOrganization
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrganizationRequest"
+      responses:
+        "200":
+          description: Organization updated; all users denied auth immediately if deactivated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Organization not found
+
+  /system/health:
+    get:
+      summary: Aggregate system health metrics (FR-012, US5)
+      description: Returns aggregate counts with no user-identifiable or org-specific data
+      operationId: systemHealth
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemHealth"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Unauthorized:
+      description: Missing, invalid, expired, or revoked access token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Authenticated but insufficient role for this operation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    CreateUserRequest:
+      type: object
+      required: [email, password, role]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        role:
+          type: string
+          enum: [admin, user]
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [active, inactive]
+        role:
+          type: string
+          enum: [admin, user]
+
+    UserSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        role:
+          type: string
+        status:
+          type: string
+        credential_type:
+          type: string
+          enum: [password, api_key]
+        locked_until:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    UserDetail:
+      allOf:
+        - $ref: "#/components/schemas/UserSummary"
+
+    CreateServiceAccountRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email:
+          type: string
+          format: email
+          description: Unique identifier for the service account; convention is service+name@domain
+        role:
+          type: string
+          enum: [admin, user]
+
+    ServiceAccountCreated:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        role:
+          type: string
+        api_key:
+          type: string
+          description: >
+            Raw API key — shown ONCE; not stored in plain text. Client must save this value.
+        created_at:
+          type: string
+          format: date-time
+
+    AuditEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        occurred_at:
+          type: string
+          format: date-time
+        user_id:
+          type: string
+          format: uuid
+          nullable: true
+        event_type:
+          type: string
+          enum: [LOGIN_SUCCESS, LOGIN_FAILURE, LOGOUT, TOKEN_REFRESH, ACCOUNT_LOCKED]
+        ip_address:
+          type: string
+
+    CreateOrganizationRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+
+    UpdateOrganizationRequest:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [active, inactive]
+
+    OrganizationDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    SystemHealth:
+      type: object
+      properties:
+        organization_count:
+          type: integer
+        active_organization_count:
+          type: integer
+        active_user_count:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string

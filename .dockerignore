@@ -1,0 +1,35 @@
+.git/
+.gitignore
+.idea/
+.vscode/
+.claude/
+.specify/
+specs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Testing
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment — never bake secrets into the image
+.env
+.env.*
+!.env.example
+
+# Docs
+docs/
+*.md
+!README.md
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore

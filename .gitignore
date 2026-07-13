@@ -1,2 +1,37 @@
+# IDE
 .idea/
+.vscode/
 .claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Environment — NEVER commit secrets
+.env
+.env.*
+!.env.example
+
+# Alembic
+alembic/versions/__pycache__/
+
+# OS
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp

@@ -1,0 +1,224 @@
+openapi: "3.1.0"
+info:
+  title: KnowledgeAI Auth API
+  version: "1.0.0"
+  description: Authentication endpoints (login, refresh, logout, bootstrap setup)
+
+paths:
+  /health:
+    get:
+      summary: Service health check
+      operationId: healthCheck
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  version:
+                    type: string
+
+  /setup:
+    post:
+      summary: One-time deployment bootstrap (FR-013, US2)
+      description: >
+        Creates the first organization and its first admin user on a fresh deployment.
+        Permanently disabled once any organization exists. Must be invoked via CLI or
+        protected bootstrap endpoint — not the standard API surface.
+      operationId: runSetup
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetupRequest"
+      responses:
+        "201":
+          description: Setup complete; first organization and admin created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetupResponse"
+        "409":
+          description: System already initialized (organizations exist)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/login:
+    post:
+      summary: Authenticate and obtain tokens (FR-003, FR-014, FR-015, FR-016, US1)
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "401":
+          description: Invalid credentials (wrong password, unknown email, locked account,
+            deactivated user/org) — response is intentionally identical for all failure
+            reasons to prevent user enumeration (FR-016)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/refresh:
+    post:
+      summary: Rotate refresh token and obtain new access token (FR-015, US1)
+      operationId: refreshTokens
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: New access token and rotated refresh token issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "401":
+          description: Refresh token invalid, expired, or already used (theft detected —
+            entire token family revoked)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/logout:
+    post:
+      summary: Revoke access and refresh tokens (US1)
+      operationId: logout
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogoutRequest"
+      responses:
+        "204":
+          description: Logged out; access token JTI added to revoked_tokens; refresh token invalidated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Unauthorized:
+      description: Missing, invalid, expired, or revoked access token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Authenticated but insufficient role for this operation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    SetupRequest:
+      type: object
+      required: [organization_name, admin_email, admin_password]
+      properties:
+        organization_name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        admin_email:
+          type: string
+          format: email
+        admin_password:
+          type: string
+          minLength: 8
+
+    SetupResponse:
+      type: object
+      properties:
+        organization_id:
+          type: string
+          format: uuid
+        organization_name:
+          type: string
+        admin_user_id:
+          type: string
+          format: uuid
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          format: uuid
+
+    LogoutRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          format: uuid
+
+    TokenPair:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: Signed HS256 JWT; carries sub, jti, org, role, iat, exp
+        refresh_token:
+          type: string
+          format: uuid
+          description: Opaque UUID; rotate on every use
+        token_type:
+          type: string
+          example: bearer
+        expires_in:
+          type: integer
+          description: Access token TTL in seconds (matches ACCESS_TOKEN_EXPIRE_SECONDS env var)
+
+    ErrorResponse:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
