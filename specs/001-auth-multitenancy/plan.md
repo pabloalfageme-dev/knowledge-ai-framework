@@ -21,7 +21,14 @@ the prerequisite gate every other framework module depends on.
 Alembic, asyncpg (PostgreSQL async driver), pydantic-settings
 
 **Storage**: PostgreSQL 15+ — five tables: `organizations`, `users`, `audit_log`,
-`refresh_tokens`, `revoked_tokens`
+`refresh_tokens`, `revoked_tokens`; the `users` table carries a `token_version INTEGER`
+column (NOT NULL, default 1): incrementing it invalidates all JWTs previously issued to
+that user within at most one `REVOCATION_CACHE_TTL_SECONDS` window — the `tv` claim is
+compared against `users.token_version` when the in-process revocation cache misses or
+expires (same cache and same TTL as the user/org status check), not on every individual
+request; this is the primary revocation mechanism for user deactivation and role changes,
+complementing the `revoked_tokens` JTI blocklist used only for explicit logout (see Research
+Decision 2)
 
 **Testing**: pytest + pytest-asyncio; httpx (async test client); real PostgreSQL instance for
 integration tests (no mocks per constitution §VIII)
@@ -30,12 +37,20 @@ integration tests (no mocks per constitution §VIII)
 
 **Project Type**: web-service (FastAPI REST API, backend-only)
 
-**Performance Goals**: login endpoint p95 < 200ms; deactivation effective on next request
-(no restart); audit log entry visible within 1 s of event (SC-003)
+**Performance Goals**: login endpoint p95 < 200ms; new login attempts against a deactivated
+user/org rejected immediately (login reads live DB state); existing tokens for a deactivated
+user/org rejected within one revocation cache TTL window (default 30 s, configurable via
+`REVOCATION_CACHE_TTL_SECONDS`, no restart required); audit log entry visible within 1 s of
+event (SC-003)
 
 **Constraints**: every env-var driven; no hardcoded secrets or config values; organization
 isolation enforced at the database layer via PostgreSQL RLS (`SET LOCAL app.current_org_id`
-per transaction); application role `kn_app` cannot bypass RLS
+per transaction); application role `kn_app` cannot bypass RLS; super-admin cross-org
+operations — specifically FR-012 system-health aggregates and org lifecycle management —
+use a second DB role `kn_admin` (`BYPASSRLS`) via a dedicated connection; all `kn_admin`
+queries return only aggregate counts or org-level metadata, never individual user rows, so
+FR-012's no-user-PII guarantee is enforced at the application layer rather than the DB
+layer (see Research Decision 1 for the full rationale and kn_admin scope)
 
 **Scale/Scope**: SME pilot — 3 client organizations, ~10–50 users each; single-process
 deployment initially; modular so other framework modules can import the auth dependency without
@@ -69,7 +84,11 @@ pulling in unrelated code
 | VII. Observability | ✅ PASS | Full audit log; `/health` endpoint; errors logged with request_id + tenant_id |
 | VIII. Test-Driven Quality | ✅ PASS | Unit (≥80%) + integration tests against real PostgreSQL; type hints mandatory |
 
-**Complexity Tracking**: No violations — table omitted.
+**Complexity Tracking**:
+
+| Principle | Deviation | Justification |
+|-----------|-----------|---------------|
+| VI. Security by Default | `kn_admin` performs a full RLS bypass; FR-012's no-user-PII guarantee is enforced at the application layer rather than the DB layer | No RLS mechanism exists for legitimate cross-org aggregates: a `COUNT(*)` across all organizations cannot be scoped to a single `current_org_id`, and creating a new organization has no existing org context to which a policy could apply. Mitigated by restricting `kn_admin` exclusively to aggregate counts and org-level metadata — it never returns individual user rows, so the application-layer constraint enforces FR-012 in practice. |
 
 ## Project Structure
 

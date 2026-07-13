@@ -58,6 +58,13 @@ WHERE u.id = :user_id
 Reject if: `u.status != 'active'` OR `token.tv != u.token_version` OR
 `o.status != 'active'`.
 
+**In-process cache note** (added 2026-07-13 post-clarify): The per-request DB check may be
+served from an in-process short-TTL cache (default 30 s, env var
+`REVOCATION_CACHE_TTL_SECONDS`) to reduce DB load. New login attempts always bypass the
+cache and read live DB state. This means existing-token rejection is effective within one
+cache window, while new logins against deactivated accounts are rejected immediately.
+This trade-off was explicitly accepted in spec clarification session 2026-07-13 (SC-007).
+
 **Alternatives considered**:
 - *Per-JTI blocklist table*: provides true instant revocation for logout but requires an
   extra table, a PK lookup on every request, and a pruning job. The access-token TTL of

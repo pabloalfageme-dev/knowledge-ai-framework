@@ -145,11 +145,13 @@ curl -s -X PATCH $BASE/users/$USER_ID \
   -d '{"status":"inactive"}' | jq .
 # Expected: 200, status=inactive
 
-# 3d. Deactivated user cannot log in
+# 3d. Deactivated user cannot log in (new login reads live DB — immediate)
 curl -s -X POST $BASE/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"alice@acme.example","password":"Alice1234!"}' | jq .
-# Expected: 401 (same shape as wrong password)
+# Expected: 401 immediately (same shape as wrong password)
+# Note: requests using an already-issued token are rejected within one revocation
+#       cache window (default 30 s) — see REVOCATION_CACHE_TTL_SECONDS in .env
 
 # 3e. Cross-organization rejection (create a second org to test)
 # First, log in as super_admin (created via DB or CLI directly)
@@ -173,7 +175,8 @@ curl -s "$BASE/audit" \
 # 4c. Verify only own-org entries
 curl -s "$BASE/audit" \
   -H "Authorization: Bearer $ACCESS" | jq '[.items[].event_type] | unique'
-# Expected: only LOGIN_SUCCESS, LOGIN_FAILURE, LOGOUT, TOKEN_REFRESH for Acme Bikes users
+# Expected: only LOGIN_SUCCESS, LOGIN_FAILURE, LOGOUT, TOKEN_REFRESH, ACCOUNT_LOCKED
+#           for Acme Bikes users — no entries from other organizations
 ```
 
 ---

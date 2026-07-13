@@ -257,7 +257,11 @@ paths:
               $ref: "#/components/schemas/UpdateOrganizationRequest"
       responses:
         "200":
-          description: Organization updated; all users denied auth immediately if deactivated
+          description: >
+            Organization updated. If deactivated: new login attempts against users in this
+            org are denied immediately (login reads live DB state); requests bearing
+            already-issued tokens are rejected within one revocation cache window (default
+            30 s, configurable).
           content:
             application/json:
               schema:

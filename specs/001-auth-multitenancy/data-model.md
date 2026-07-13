@@ -162,4 +162,10 @@ verification, joining `users` + `organizations` to assert:
 3. `organizations.status = 'active'`
 
 If any condition fails, the request is rejected with 401. This single query covers all
-immediate deactivation and revocation scenarios with no extra table needed.
+deactivation and revocation scenarios with no extra table needed.
+
+**Revocation cache**: The result of this per-request DB check MAY be served from an
+in-process short-TTL cache (default 30 s, configurable via `REVOCATION_CACHE_TTL_SECONDS`)
+to reduce DB load at scale. A deactivated user or organization is therefore rejected within
+at most one cache window for requests bearing already-issued tokens. New login attempts
+always read live DB state (no cache involved).
