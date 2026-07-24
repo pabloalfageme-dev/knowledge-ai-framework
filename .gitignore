@@ -2,6 +2,7 @@
 .idea/
 .vscode/
 .claude/
+.agents/
 
 # Python
 __pycache__/
